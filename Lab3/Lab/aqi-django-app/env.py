@@ -1,0 +1,4 @@
+# IAM User access configuration
+AWS_ACCESS_KEY="AKIA2ZGOWDKUERXHLP6X"
+AWS_SECRET_ACCESS_KEY="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"
+AWS_REGION="us-east-1"

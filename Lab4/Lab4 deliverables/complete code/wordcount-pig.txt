@@ -1,0 +1,13 @@
+--In Local mode with input file on Hadoop instance:
+a = LOAD 'file:///home/hadoop/book.txt' as (lines:chararray);
+
+--In MapReduce mode with input file on HDFS:
+a = LOAD '/user/ekim390/book.txt' as (lines:chararray);
+
+
+b = FOREACH a GENERATE FLATTEN(TOKENIZE(lines)) as word;
+c = GROUP b by word;
+d = FOREACH c GENERATE group, COUNT(b);
+store d into '/user/ekim390/pig_wordcount';
+
+

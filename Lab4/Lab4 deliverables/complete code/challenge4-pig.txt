@@ -1,0 +1,14 @@
+--In Local mode with input file on Hadoop instance:
+a = LOAD 'file:///home/hadoop/googlebooks-eng-us-all-2gram-20090715-50-subset.csv' USING PigStorage('\t') as (bigram:chararray, year:int, match_count:int, page_count:int, volume_count:int);
+
+--In MapReduce mode with input file on HDFS:
+a = LOAD '/user/ekim390/googlebooks-eng-us-all-2gram-20090715-50-subset.csv' USING PigStorage('\t') as (bigram:chararray, year:int, match_count:int, page_count:int, volume_count:int);
+
+
+groupByYear = GROUP a BY year;
+maxByYear = FOREACH groupByYear {
+    orderByCount = ORDER a BY match_count desc;
+    maxByCount = LIMIT orderByCount 1;
+    GENERATE FLATTEN(maxByCount.year), FLATTEN(maxByCount.bigram), FLATTEN(maxByCount.match_count);
+};
+store maxByYear into '/user/ekim390/challenge4output';

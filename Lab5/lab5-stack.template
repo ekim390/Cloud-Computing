@@ -1,0 +1,699 @@
+#################################################################
+# Use the instructions (PDF) given to you to configure your CF
+#################################################################
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'Lab5: Real-time Social Media Sentiment Analysis with AWS Kinesis, Lambda, ElasticSearch Service and DynamoDB'
+
+Metadata:
+
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Tweets Listener Configuration
+        Parameters:
+          - TwitterKeywords
+
+      - Label:
+          default: Code location in S3 Bucket
+        Parameters:
+          - CodeLocationS3
+
+      - Label:
+          default: Twitter API Authorization Parameters
+        Parameters:
+          - TwitterAPIKeyParameter
+          - TwitterAPISecretKeyParameter
+          - TwitterAccessTokenParameter
+          ###################################
+          # MISSING PARAMETER
+          # INSERT BELOW THIS LINE AND INSIDE THIS ENCLOSURE:
+          - TwitterAccessSecretParameter
+          #
+          ###################################
+
+      - Label:
+          default: Elasticsearch Configuration
+        Parameters:
+          - ESDomainIPAddress
+
+      - Label:
+          default: Kinesis Firehose Configuration
+        Parameters:
+          - KinesisFirehoseFailedDeliveryS3Bucket
+
+      - Label:
+          default: AWS EC2 Configuration
+        Parameters:
+          - VpcID
+          - SubnetID
+          - InstanceKeyName
+
+Parameters:
+
+  CodeLocationS3:
+    Description: S3 Bucket where the code for the EC2 and Lambda Functions are located
+    Type: String
+
+  TwitterAPIKeyParameter:
+    Description: Consumer key for access twitter
+    Type: String
+    NoEcho: True
+
+  TwitterAPISecretKeyParameter:
+    Description: Consumer Secret for access twitter
+    Type: String
+    NoEcho: True
+
+  TwitterAccessTokenParameter:
+    Description: Access Token for calling twitter
+    Type: String
+    NoEcho: True
+
+  TwitterAccessSecretParameter:
+    Description: Access Token Secret for calling twitter
+    Type: String
+    NoEcho: True
+
+  TwitterDataStream:
+    Description: The name of the Kinesis stream. If you don't specify a name, AWS CloudFormation generates a unique physical ID and uses that ID for the stream name.
+    Type: String
+    Default: twitter-stream-cf
+
+  TwitterDataStorage:
+    Description: The name of the DynamoDB table. If you don't specify a name, AWS CloudFormation generates a unique physical ID and uses that ID for the stream name.
+    Type: String
+    Default: Tweet-cf
+
+  TwitterElasticsearchDomainName:
+    Description: The Elasticsearch domain name will be part of your domain endpoint. If you don't specify a name, AWS CloudFormation generates a unique physical ID and uses that ID for the stream name.
+    Type: String
+    Default: twitter-search-cf
+
+  ESDomainIPAddress:
+    Description: Allow access to elasticsearch using your own IPv4 address (e.g., 0.0.0.0). If you don't specify a IPv4 address, AWS CloudFormation is going to allow any IP address or it might not work.
+    Type: String
+    Default: '1.2.3.4'
+  
+  KinesisFirehoseFailedDeliveryS3Bucket:
+    Description: Name of the bucket where your failed processed data are going to be stored. If you don't specify a name, AWS CloudFormation generates a unique physical ID and uses that ID for the stream name.
+    Type: String
+
+  TwitterDataFirehose:
+    Description: The name of the Kinesis Data Firehose. If you don't specify a name, AWS CloudFormation generates a unique physical ID and uses that ID for the stream name.
+    Type: String
+    Default: twitter-firehose-cf
+
+  TwitterElasticSearchIndexName:
+    Description: The name of the index for Elasticsearch. If you don't specify a name, AWS CloudFormation generates a unique physical ID and uses that ID for the stream name.
+    Type: String
+    Default: twittersentiment
+
+  VpcID:
+    Description: Please enter the VPC ID
+    Type: AWS::EC2::VPC::Id
+
+  SubnetID:
+    Description: Please enter the Subnet ID under the VPC. Make sure it is connected to the internet gateway.
+    Type: AWS::EC2::Subnet::Id
+
+  InstanceKeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: The name of the private key file to use for SSH/RDP access.  You shouldn't need to do any SSH access, but just in case.
+
+  UbuntuAmiId:
+    Type: AWS::EC2::Image::Id
+    Default: ami-042e8287309f5df03
+
+Mappings:
+
+  Function:
+    SentimentAnalysisFunction:
+      S3Key: lambda/sentiment-analysis.zip
+
+    KinesisToDynamoFunction:
+      S3Key: lambda/kinesis-to-dynamo.zip
+
+  Ec2:
+    TwitterListener:
+      S3Key: ec2/listener.zip
+
+Resources:
+
+  TwitterAPIKey:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: TwitterAPIKey-cf
+      SecretString:
+        !Ref TwitterAPIKeyParameter
+
+  ####################################################
+  # CREATE SECRET FOR TWITTER API SECRET.
+  # THE NAME OF THE RESOURCE: TwitterAPISecretKey-cf.
+  # THE SECRET STRING IS LOCATED IN THE "PARAMETERS".
+  # INSERT BELOW THIS LINE AND INSIDE THIS ENCLOSURE:
+  TwitterAPISecretKey:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: TwitterAPISecretKey-cf
+      SecretString:
+        !Ref TwitterAPISecretKeyParameter
+  #
+  ####################################################
+  TwitterAccessToken:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: TwitterAccessToken-cf
+      SecretString:
+        !Ref TwitterAccessTokenParameter
+
+  TwitterAccessSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: TwitterAccessSecret-cf
+      SecretString:
+        !Ref TwitterAccessSecretParameter
+
+  #################################################################################
+  # CREATE A KINESIS DATA STREAM.
+  # THE NAME OF THE RESOURCE: TwitterStream.
+  # THE NAME OF THE SERVICE: TwitterDataStream <-- LOCATED IN THE "PARAMETERS".
+  # INSERT BELOW THIS LINE AND INSIDE THIS ENCLOSURE:
+  TwitterStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: !Ref TwitterDataStream
+      ShardCount: 1
+  #
+  #################################################################################
+  TwitterTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: id_str
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: N
+      KeySchema:
+        - AttributeName: id_str
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+      TableName: !Ref TwitterDataStorage
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
+
+  KinesisToDynamoAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: kinesis-to-dynamo-access-role-cf
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+      Policies:
+        - PolicyName: kinesis-to-dynamo-access-policy-cf
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: DynamoDBLimitedWrite
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource:
+                  - !Join ['', [!Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/', !Ref TwitterTable]]
+              ####################################################################################
+              # ADD THE MISSING ACCESS TO POLICY IN THE ROLE.
+              # REMEBER TO ADD A "Sid"
+              # INSERT BELOW THIS LINE AND INSIDE THIS ENCLOSURE:
+              - Sid: KinesisLimitedReadList
+                Effect: Allow
+                Action:
+                  - kinesis:GetRecords
+                  - kinesis:GetShardIterator
+                  - kinesis:DescribeStream
+                  - kinesis:ListShards
+                  - kinesis:ListStreams
+                Resource:
+                  !Join ['', [!Sub 'arn:aws:kinesis:${AWS::Region}:${AWS::AccountId}:stream/', !Ref TwitterStream]]
+              #
+              ###################################################################################
+              - Sid: CloudWatchLogsLimitedWrite
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:CreateLogGroup
+                  - logs:PutLogEvents
+                Resource:
+                - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+                - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*:log-stream:*"
+
+  KinesisToDynamoLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.8
+      FunctionName: kinesis-to-dynamo-cf
+      ##############################
+      # ADD MISSING CONFIGURATION FOR THE LAMBDA FUNCTION (Hint: MORE SPACE AND MORE TIME).
+      # INSERT BELOW THIS LINE AND INSIDE THIS ENCLOSURE:
+      MemorySize: 2048
+      Timeout: 300
+      #
+      ##############################
+      Role:
+        Fn::GetAtt:
+        - KinesisToDynamoAccessRole
+        - Arn
+      Environment:
+        Variables:
+          TWEET_TABLE: !Ref TwitterDataStorage
+      Code:
+        S3Bucket: !Ref CodeLocationS3
+        S3Key: !FindInMap [ Function, KinesisToDynamoFunction, S3Key]
+
+  KinesisToDynamoLambdaEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties: 
+      BatchSize: 10 
+      Enabled: true
+      EventSourceArn: !GetAtt TwitterStream.Arn
+      FunctionName: !GetAtt KinesisToDynamoLambda.Arn
+      MaximumBatchingWindowInSeconds: 60
+      StartingPosition: LATEST 
+
+  SentimentsAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: sentiments-access-role-cf
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          ###################################################################
+          # THERE IS SOMETHING WRONG IN THIS SECTION. FIX THE ISSUE
+          # INSERT BELOW THIS LINE AND INSIDE THIS ENCLOSURE:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+          #
+          ###################################################################
+      Policies:
+        - PolicyName: sentiments-access-policy-cf
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              #################################################################
+              # COMPLETE THE STATEMENT FOR ACCESS FOR THE POLICY IN THE ROLE.
+              # INSERT BELOW THIS LINE AND INSIDE THIS ENCLOSURE:
+              - Sid: DynamoDBLimitedWriteRead
+                Effect: Allow
+                Action:
+                  - dynamodb:GetShardIterator
+                  - dynamodb:ListStreams
+                  - dynamodb:DescribeStream
+                  - dynamodb:GetRecords
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !Join ['', [!Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/', !Ref TwitterTable, '/stream/*']]
+                  - !Join ['', [!Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/', !Ref TwitterTable]]
+              - Sid: CloudWatchLogsLimitedWrite
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:CreateLogGroup
+                  - logs:PutLogEvents
+                Resource:
+                - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+                - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*:log-stream:*"
+              - Sid: ComprehendLimitedWrite
+                Effect: Allow
+                Action:
+                  - comprehend:DetectSentiment
+              #
+              #################################################################
+
+  SentimentsLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.8
+      FunctionName: sentiments-analysis-cf
+      ##############################
+      # ADD MISSING CONFIGURATION FOR THE LAMBDA FUNCTION (Hint: MORE SPACE AND MORE TIME).
+      # INSERT BELOW THIS LINE AND INSIDE THIS ENCLOSURE:
+      MemorySize: 2048
+      Timeout: 300
+      #
+      ##############################
+      Role:
+        Fn::GetAtt:
+        - SentimentsAccessRole
+        - Arn
+      Environment:
+        Variables:
+          TWEET_TABLE: !Ref TwitterDataStorage
+      Code:
+        S3Bucket: !Ref CodeLocationS3
+        S3Key: !FindInMap [ Function, SentimentAnalysisFunction, S3Key]
+
+  SentimentsLambdaEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties: 
+      BatchSize: 1 
+      Enabled: true
+      EventSourceArn: !GetAtt TwitterTable.StreamArn
+      FunctionName: !GetAtt SentimentsLambda.Arn
+      MaximumBatchingWindowInSeconds: 0
+      StartingPosition: LATEST 
+
+  TwitterElasticsearchDomain:
+    Type: AWS::Elasticsearch::Domain
+    Properties:
+      DomainName: !Ref TwitterElasticsearchDomainName
+      ElasticsearchVersion: 7.9
+      ElasticsearchClusterConfig:
+        InstanceCount: 1
+        InstanceType: t2.small.elasticsearch
+        ZoneAwarenessEnabled: false
+      EBSOptions:
+        EBSEnabled: true
+        Iops: 0
+        VolumeSize: 30
+        VolumeType: gp2
+      SnapshotOptions:
+        AutomatedSnapshotStartHour: 0
+      AdvancedOptions:
+        rest.action.multi.allow_explicit_index: 'true'
+      AccessPolicies:
+        Version: 2012-10-17
+        Statement:
+          ###################################################################
+          # COMPLETE THE STATEMENT TO ALLOW "ANY" ACTIONS TO ELASTICSEARCH WITH A CONDITION TO ALLOW THESE ACTIONS ONLY THROUGH YOUR IP ADDRESS.
+          # THE IP ADDRESS REFERENCE (ESDomainIPAddress) IS LOCATED IN THE "PARAMETERS".
+          # INSERT BELOW THIS LINE AND INSIDE THIS ENCLOSURE:
+          Effect: Allow
+          Principal:
+            AWS: '*'
+          Condition:
+            IpAddress:
+              aws:SourceIp: !Ref ESDomainIPAddress 
+          Resource: !Join ['', [!Sub 'arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/', !Ref TwitterElasticsearchDomainName]]
+          #
+          ###################################################################
+
+  FirehoseAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: firehose-access-role-cf
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          ###################################################################
+          # THERE IS SOMETHING WRONG IN THIS SECTION. FIX THE ISSUE
+          # INSERT BELOW THIS LINE AND INSIDE THIS ENCLOSURE:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: firehose.amazonaws.com
+          #
+          ###################################################################
+      Policies:
+        - PolicyName: firehose-access-policy-cf
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: S3LimitedWriteRead
+                Effect: Allow
+                Action:
+                  - S3:AbortMultipartUpload
+                  - S3:GetBucketLocation
+                  - S3:GetObject
+                  - S3:ListBucket
+                  - S3:ListBucketMultipartUploads
+                  - S3:PutObject
+                Resource:
+                  - !Join ['', [!Sub 'arn:aws:s3:::', !Ref KinesisFirehoseFailedDeliveryS3Bucket]]
+                  - !Join ['', [!Sub 'arn:aws:s3:::', !Ref KinesisFirehoseFailedDeliveryS3Bucket, '/*']]
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                  - lambda:GetFunctionConfiguration
+                Resource:
+                  - !GetAtt SentimentsLambda.Arn
+              ####################################################################################
+              # ADD THE MISSING ACCESS TO POLICY IN THE ROLE.
+              # REMEBER TO ADD A "Sid"
+              # INSERT BELOW THIS LINE AND INSIDE THIS ENCLOSURE:
+              - Sid: CloudWatchLogsLimitedWrite
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:CreateLogGroup
+                  - logs:PutLogEvents
+                Resource:
+                - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+                - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*:log-stream:*"
+              - Sid: KinesisLimitedReadList
+                Effect: Allow
+                Action:
+                  - kinesis:GetRecords
+                  - kinesis:GetShardIterator
+                  - kinesis:DescribeStream
+                  - kinesis:ListShards
+                Resource:
+                  !Join ['', [!Sub 'arn:aws:kinesis:${AWS::Region}:${AWS::AccountId}:stream/', !Ref TwitterStream]]
+              - Sid: LambdaLimitedWriteRead
+                Effect: Allow
+                Action:
+                  - lambda:GetFunctionConfiguration
+                  - lambda:InvokeFunction
+                Resource:
+                  !Join ['', [!Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:', !Ref SentimentsLambda, ':$LATEST']]
+              - Sid: ElasticSearchLimitedWriteReadList
+                Effect: Allow
+                Action:
+                  - es:DescribeElasticsearchDomains
+                  - es:DescribeElasticsearchDomain
+                  - es:DescribeElasticsearchDomainConfig
+                  - es:ESHttpGet
+                  - es:ESHttpPost
+                  - es:ESHttpPut
+                Resource:
+                  !Join ['', [!Sub 'arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/', !Ref TwitterElasticsearchDomainName]]
+                  !Join ['', [!Sub 'arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/', !Ref TwitterElasticsearchDomainName, '/*']]
+              #
+              ####################################################################################
+
+  TwitterDeliveryStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamName: !Ref TwitterDataFirehose
+      DeliveryStreamType: KinesisStreamAsSource
+      KinesisStreamSourceConfiguration: 
+        ###################################################################
+        # THERE ARE TWO CONFIGURATIONS MISSING IN THIS ENCLOUSURE. ADD THE MISSING KEYS/VALUES. 
+        # INSERT BELOW THIS LINE AND INSIDE THIS ENCLOSURE:
+        KinesisStreamARN: !GetAtt TwitterStream.Arn
+        RoleARN: !GetAtt FirehoseAccessRole.Arn
+        #
+        ###################################################################
+      ElasticsearchDestinationConfiguration:
+        BufferingHints:
+          IntervalInSeconds: 60
+          SizeInMBs: 1
+        CloudWatchLoggingOptions: 
+          Enabled: true
+          LogGroupName: "deliverystream"
+          LogStreamName: "firehoseBackup"
+        DomainARN: !GetAtt TwitterElasticsearchDomain.DomainArn
+        IndexName: !Ref TwitterElasticSearchIndexName
+        IndexRotationPeriod: NoRotation
+        RetryOptions:
+          DurationInSeconds: 60
+        RoleARN: !GetAtt FirehoseAccessRole.Arn
+        S3BackupMode: FailedDocumentsOnly
+        S3Configuration:
+          BucketARN: !Join ['', [!Sub 'arn:aws:s3:::', !Ref KinesisFirehoseFailedDeliveryS3Bucket]]
+          BufferingHints:
+            IntervalInSeconds: 60
+            SizeInMBs: 1
+          CompressionFormat: UNCOMPRESSED
+          RoleARN: !GetAtt FirehoseAccessRole.Arn
+          CloudWatchLoggingOptions: 
+            Enabled: true
+            LogGroupName: "deliverystream"
+            LogStreamName: "s3Backup"
+        ProcessingConfiguration:
+          Enabled: true
+          Processors:
+          - Type: Lambda
+            Parameters:
+            - ParameterName: LambdaArn
+              ParameterValue: !GetAtt SentimentsLambda.Arn
+            - ParameterName: RoleArn
+              ParameterValue: !GetAtt FirehoseAccessRole.Arn
+            - ParameterName: NumberOfRetries
+              ParameterValue: '3'
+            - ParameterName: BufferSizeInMBs
+              ParameterValue: '1'
+            - ParameterName: BufferIntervalInSeconds
+              ParameterValue: '60'
+
+  EC2ToKinesisAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ec2-to-kinesis-access-role-cf
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service: ec2.amazonaws.com
+
+      Policies:
+        - PolicyName: ec2-to-kinesis-access-policy-cf
+          PolicyDocument:
+            Statement:
+              ####################################################################################
+              # COMPLETE THE STATEMENT TO ALLOW ACCESS TO THE REQUIRED SERVICES.
+              # REMEBER TO ADD A "Sid"
+              # INSERT BELOW THIS LINE AND INSIDE THIS ENCLOUSURE:
+              - Sid: KinesisLimitedWrite
+                Effect: Allow
+                Action:
+                  - kinesis:PutRecord
+                Resource:
+                  !Join ['', [!Sub 'arn:aws:kinesis:${AWS::Region}:${AWS::AccountId}:stream/', !Ref TwitterStream]]
+              - Sid: ElasticSearchLimitedWriteRead
+                Effect: Allow
+                Action:
+                  - es:ESHttpGet
+                  - es:ESHttpHead
+                  - es:ESHttpPut
+                Resource:
+                  !Join ['', [!Sub 'arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/', !Ref TwitterElasticsearchDomainName]]
+                  !Join ['', [!Sub 'arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/', !Ref TwitterElasticsearchDomainName, '/*']]
+              - Sid: SecretsManagerLimitedRead
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:Twitter*'
+              #
+              ####################################################################################
+
+  TweetsEC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: Lab5-access-SG-cf
+      GroupDescription: SG for Lab5 to allow access to the EC2
+      VpcId: !Ref VpcID
+      SecurityGroupIngress:
+        ####################################################################################
+        # ADD A INBOUND RULE THAT ALLOWS TO ACCESS THE EC2 THROUGH SSH FROM "ANY" IP ADDRESS
+        # INSERT BELOW THIS LINE AND INSIDE THIS ENCLOUSURE:
+        IpProtocol: -1
+        FromPort: -1
+        ToPort: -1
+        #
+        ####################################################################################
+      SecurityGroupEgress:
+        ####################################################################################
+        # ADD A OUTBOUND RULE THAT ALLOWS ALL TRAFFIC OUTSIDE YOUR EC2 TO "ANY" IP ADDRESS
+        # INSERT BELOW THIS LINE AND INSIDE THIS ENCLOUSURE:
+        IpProtocol: -1
+        FromPort: -1
+        ToPort: -1
+        #
+        ####################################################################################
+
+  TwitterStreamingInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: '/'
+      Roles:
+        - !Ref EC2ToKinesisAccessRole
+
+  TwitterListener:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId : !Ref UbuntuAmiId
+      InstanceType: t2.micro
+      KeyName: !Ref InstanceKeyName
+      SecurityGroupIds:
+      - !Ref TweetsEC2SecurityGroup
+      IamInstanceProfile: !Ref TwitterStreamingInstanceProfile
+      SubnetId: !Ref SubnetID
+      BlockDeviceMappings: 
+      - DeviceName: "/dev/sda1"
+        Ebs: 
+          Encrypted: True
+          VolumeType: gp2
+          DeleteOnTermination: True
+          VolumeSize: 30
+      UserData:
+        Fn::Base64:
+          Fn::Sub:
+          ####################################################################
+          # THERE IS MISSING COMMAND IN THE IN THE SECTION BELOW.
+          # HINT: BEFORE THE COMMAND TO RUN THE LISTENER AND AFTER INSTALLING ALL THE LIBRARIES REQUIRED.
+          # ADD THIS COMMAND BEFORE CREATING THE CF STACK.
+          - |
+            #!/bin/bash -ex
+            sleep 30
+
+            sudo apt update -y
+            sudo apt install python3-pip -y
+            sudo apt install unzip -y
+
+            echo "ES_INDEX = '${ES_DOMAIN_INDEX}'
+            ES_URL = '${ES_DOMAIN_URL}'
+            CF = True
+            KINESIS_STREAM = '${KINESIS_STREAM_NAME}'
+            " > /home/ubuntu/config.py
+
+            wget ${TW_LISTENER_CODE}
+
+            unzip -q listener.zip -d /home/ubuntu/
+            cd /home/ubuntu
+
+            pip3 install -r requirements.txt
+
+            /usr/bin/nohup /usr/bin/python3 es_index.py &
+
+            /usr/bin/nohup /usr/bin/python3 listener.py &
+
+            echo "Service started."
+          - {
+              TW_LISTENER_CODE: !Join ['', ['https://', !Ref CodeLocationS3, '.s3.amazonaws.com/', !FindInMap [ Ec2, TwitterListener, S3Key]]],
+              ES_DOMAIN_URL: !GetAtt TwitterElasticsearchDomain.DomainEndpoint,
+              ES_DOMAIN_INDEX: !Ref TwitterElasticSearchIndexName,
+              KINESIS_STREAM_NAME: !Ref TwitterDataStream
+            }
+          #
+          ####################################################################
+
+Outputs:
+
+  ElasticSeatchURL:
+    Description: Elasticsearch URL
+    Value: !Join ["", ["https://", !GetAtt TwitterElasticsearchDomain.DomainEndpoint]]
+
+  KibanaFrontEnd:
+    Description: Kibana URL
+    Value: !Join ["", ["https://", !GetAtt TwitterElasticsearchDomain.DomainEndpoint, "/_plugin/kibana/"]]
+
+  TwitterListenerIP:
+    Description: Twitter listener EC2 URL
+    Value: !GetAtt TwitterListener.PublicIp
+    
